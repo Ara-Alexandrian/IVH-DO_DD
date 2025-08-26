@@ -1,0 +1,11 @@
+
+# Virtual environment
+DODD/
+
+# Test screenshots
+tests/misc/*.png
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
