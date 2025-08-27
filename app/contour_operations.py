@@ -263,7 +263,7 @@ def estimate_expected_tissue_values(ct_volume, metal_mask, spacing, window_size=
     print(f"Estimating expected tissue values across {ct_volume.shape} volume...")
     
     # 1. Create metal-excluded volume for analysis
-    metal_excluded_volume = ct_volume.copy()
+    metal_excluded_volume = ct_volume.copy().astype(np.float32)
     metal_excluded_volume[metal_mask] = np.nan  # Exclude metal from analysis
     
     # 2. Create distance-based weighting from metal (artifacts stronger closer to metal)

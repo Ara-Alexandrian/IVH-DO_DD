@@ -47,33 +47,44 @@ def save_mask_as_nifti(mask, affine, filepath):
     nib.save(img, filepath)
     return filepath
 
-def create_interactive_viewer(ct_slice, masks=None, slice_info="", spacing=None):
+def create_interactive_viewer(ct_slice, masks=None, slice_info="", spacing=None, window_width=400, window_center=50):
     """Create an interactive CT slice viewer with zoom and pan capabilities."""
+    # Calculate display range from window/level
+    zmin = window_center - (window_width / 2)
+    zmax = window_center + (window_width / 2)
+    
+    # Keep original window/level calculation - no auto-adjustment
+    # (Auto-adjustment was causing solid color display issues)
+    
     # Create base CT image
     fig = go.Figure()
     
     # Add CT image as heatmap (ensure proper orientation)
-    # Convert to list for plotly compatibility and proper display
+    # Convert to list for plotly compatibility and proper display  
     ct_data = ct_slice.tolist() if hasattr(ct_slice, 'tolist') else ct_slice
     
     fig.add_trace(go.Heatmap(
         z=ct_data,
         colorscale='gray',
-        zmin=-150,
-        zmax=250,
+        zmin=zmin,
+        zmax=zmax,
         showscale=True,
         colorbar=dict(
-            title="HU",
+            title=f"HU<br><sub>W:{window_width} L:{window_center}</sub>",
             x=1.02,
-            thickness=15,
-            len=0.7
+            thickness=20,
+            len=0.8,
+            tickformat=".0f"
         ),
-        hovertemplate='X: %{x}<br>Y: %{y}<br>HU: %{z:.0f}<extra></extra>',
+        hovertemplate='<b>Position</b><br>X: %{x}<br>Y: %{y}<br><b>Value</b><br>HU: %{z:.0f}<extra></extra>',
         name='CT Image'
     ))
     
     # Add contour overlays if masks are provided
     if masks:
+        st.sidebar.success(f"Processing {len(masks)} masks for contour overlay")
+        mask_names = list(masks.keys())
+        st.sidebar.info(f"Masks: {', '.join(mask_names)}")
         colors = {
             'metal': 'rgba(255, 0, 0, 0.8)',              # Bright Red
             'bright_artifacts': 'rgba(255, 255, 0, 0.8)',  # Bright Yellow
@@ -96,6 +107,7 @@ def create_interactive_viewer(ct_slice, masks=None, slice_info="", spacing=None)
                     # Create contour from mask
                     try:
                         contours = measure.find_contours(mask_slice.astype(float), 0.5)
+                        st.sidebar.info(f"{mask_name}: Found {len(contours)} contours")
                         
                         # Only show first occurrence in legend to avoid duplicates
                         show_legend = mask_name not in [trace.name for trace in fig.data if hasattr(trace, 'name')]
@@ -196,6 +208,244 @@ def create_slice_navigator(ct_volume, current_slice, metadata):
     # Display slice info
     z_pos = metadata['slice_z_positions'][current_slice]
     st.info(f"📍 Slice {current_slice + 1} of {max_slice + 1} | Z: {z_pos:.2f} mm")
+    
+    return st.session_state.current_slice
+
+# Standard CT Window/Level Presets
+CT_PRESETS = {
+    "Custom": {"window": 400, "level": 50},
+    "Soft Tissue": {"window": 350, "level": 50},
+    "Bone": {"window": 2000, "level": 500},
+    "Lung": {"window": 1500, "level": -600},
+    "Brain": {"window": 80, "level": 25},
+    "Brain Sensitive": {"window": 40, "level": 40},
+    "Abdomen": {"window": 400, "level": 50},
+    "Liver": {"window": 120, "level": 60},
+    "Metal Artifacts": {"window": 4000, "level": 1000},
+    "Full Range": {"window": 4000, "level": 0}
+}
+
+def create_window_level_controls():
+    """Create window/level controls with standard CT presets."""
+    st.markdown("**🎛️ Window/Level Controls**")
+    
+    # Preset selection
+    col1, col2 = st.columns([1, 1])
+    with col1:
+        preset = st.selectbox(
+            "CT Preset",
+            list(CT_PRESETS.keys()),
+            index=0,
+            key="wl_preset",
+            help="Standard radiological window/level presets"
+        )
+    
+    # Get preset values or use current session values
+    if preset != "Custom":
+        default_window = CT_PRESETS[preset]["window"]
+        default_level = CT_PRESETS[preset]["level"]
+    else:
+        default_window = st.session_state.get('window_width', 400)
+        default_level = st.session_state.get('window_center', 50)
+    
+    with col2:
+        reset_wl = st.button("Reset W/L", help="Reset to preset values")
+        if reset_wl:
+            st.session_state['window_width'] = default_window
+            st.session_state['window_center'] = default_level
+            st.rerun()
+    
+    # Window/Level sliders
+    col3, col4 = st.columns([1, 1])
+    with col3:
+        window_width = st.slider(
+            "Window Width (W)",
+            min_value=1,
+            max_value=4000,
+            value=int(st.session_state.get('window_width', default_window)),
+            step=10,
+            key="window_width_slider",
+            help=f"Current: {st.session_state.get('window_width', default_window)} HU"
+        )
+    
+    with col4:
+        window_center = st.slider(
+            "Window Level (L)", 
+            min_value=-1000,
+            max_value=3000,
+            value=int(st.session_state.get('window_center', default_level)),
+            step=5,
+            key="window_center_slider",
+            help=f"Current: {st.session_state.get('window_center', default_level)} HU"
+        )
+    
+    # Update session state
+    st.session_state['window_width'] = window_width
+    st.session_state['window_center'] = window_center
+    
+    # Calculate display range
+    zmin = window_center - (window_width / 2)
+    zmax = window_center + (window_width / 2)
+    
+    # Show current settings
+    with st.expander("📊 Current Settings", expanded=False):
+        col5, col6, col7 = st.columns(3)
+        with col5:
+            st.metric("Window", f"{window_width} HU")
+        with col6:
+            st.metric("Level", f"{window_center} HU")
+        with col7:
+            st.metric("Range", f"{zmin:.0f} to {zmax:.0f} HU")
+    
+    # Increment counter to trigger viewer refresh when window/level changes
+    if hasattr(st.session_state, 'prev_window_width') and hasattr(st.session_state, 'prev_window_center'):
+        if (st.session_state.prev_window_width != window_width or 
+            st.session_state.prev_window_center != window_center):
+            st.session_state.window_level_key += 1
+    
+    st.session_state.prev_window_width = window_width
+    st.session_state.prev_window_center = window_center
+    
+    return window_width, window_center, zmin, zmax
+
+def create_interactive_multi_slice_view(ct_volume, masks, slice_indices, slice_info_list):
+    """Create an interactive multi-slice plotly grid view."""
+    n_slices = len(slice_indices)
+    
+    # Calculate grid dimensions
+    if n_slices <= 4:
+        cols = 2
+        rows = 2
+    elif n_slices <= 6:
+        cols = 2
+        rows = 3
+    elif n_slices <= 9:
+        cols = 3
+        rows = 3
+    else:
+        cols = 4
+        rows = 4
+    
+    # Create subplot grid
+    from plotly.subplots import make_subplots
+    fig = make_subplots(
+        rows=rows, cols=cols,
+        subplot_titles=[f"Slice {idx}" for idx in slice_indices[:n_slices]],
+        vertical_spacing=0.05,
+        horizontal_spacing=0.05
+    )
+    
+    # Color mapping for masks
+    mask_colors = {
+        'metal': 'rgba(255,0,0,0.7)',
+        'bright_artifacts': 'rgba(255,255,0,0.6)', 
+        'dark_artifacts': 'rgba(255,0,255,0.6)',
+        'bone': 'rgba(0,50,200,0.5)'
+    }
+    
+    for i, slice_idx in enumerate(slice_indices[:n_slices]):
+        row = (i // cols) + 1
+        col = (i % cols) + 1
+        
+        # Get CT slice
+        ct_slice = ct_volume[slice_idx]
+        
+        # Add CT image
+        fig.add_trace(
+            go.Heatmap(
+                z=ct_slice.tolist(),
+                colorscale='gray',
+                showscale=False,
+                hovertemplate='HU: %{z:.0f}<extra></extra>',
+                name=f'CT {slice_idx}'
+            ),
+            row=row, col=col
+        )
+        
+        # Add mask overlays
+        for mask_name, mask in masks.items():
+            if mask is not None and isinstance(mask, np.ndarray):
+                if mask.ndim == 3:
+                    mask_slice = mask[slice_idx]
+                else:
+                    mask_slice = mask
+                
+                if np.any(mask_slice):
+                    # Create contour overlay
+                    from skimage import measure
+                    contours = measure.find_contours(mask_slice.astype(float), 0.5)
+                    
+                    for contour in contours:
+                        fig.add_trace(
+                            go.Scatter(
+                                x=contour[:, 1], y=contour[:, 0],
+                                mode='lines',
+                                line=dict(color=mask_colors.get(mask_name, 'white'), width=2),
+                                showlegend=False,
+                                hoverinfo='skip',
+                                name=mask_name
+                            ),
+                            row=row, col=col
+                        )
+    
+    # Update layout
+    fig.update_layout(
+        title="Multi-Slice Interactive View",
+        height=800,
+        showlegend=False
+    )
+    
+    # Update all subplots to have consistent axes
+    for i in range(1, rows * cols + 1):
+        fig.update_xaxes(showticklabels=False, row=((i-1) // cols) + 1, col=((i-1) % cols) + 1)
+        fig.update_yaxes(showticklabels=False, row=((i-1) // cols) + 1, col=((i-1) % cols) + 1)
+    
+    return fig
+
+def create_enhanced_slice_navigator(ct_volume, current_slice, metadata):
+    """Create an enhanced slice navigation interface integrated into plotly."""
+    max_slice = ct_volume.shape[0] - 1
+    
+    # Integrated navigation with plotly
+    col1, col2, col3, col4, col5 = st.columns([1, 1, 4, 1, 1])
+    
+    with col1:
+        if st.button("⏮️ First", help="Go to first slice"):
+            st.session_state.current_slice = 0
+            st.rerun()
+    
+    with col2:
+        if st.button("⬅️ Prev", disabled=current_slice <= 0):
+            st.session_state.current_slice = max(0, current_slice - 1)
+            st.rerun()
+    
+    with col3:
+        new_slice = st.slider(
+            "**Slice Navigator**",
+            min_value=0,
+            max_value=max_slice,
+            value=current_slice,
+            format="%d",
+            key="main_slice_slider",
+            help="Use slider or arrow keys to navigate"
+        )
+        if new_slice != current_slice:
+            st.session_state.current_slice = new_slice
+            st.rerun()
+    
+    with col4:
+        if st.button("➡️ Next", disabled=current_slice >= max_slice):
+            st.session_state.current_slice = min(max_slice, current_slice + 1)
+            st.rerun()
+    
+    with col5:
+        if st.button("⏭️ Last", help="Go to last slice"):
+            st.session_state.current_slice = max_slice
+            st.rerun()
+    
+    # Display slice info with enhanced details
+    z_pos = metadata['slice_z_positions'][current_slice]
+    st.info(f"📍 **Slice {current_slice + 1} of {max_slice + 1}** | Z: {z_pos:.2f} mm | Thickness: {abs(metadata['spacing'][0]):.2f} mm")
     
     return st.session_state.current_slice
 
@@ -324,6 +574,13 @@ if 'ct_volume' not in st.session_state:
     st.session_state.selected_patient = None
     st.session_state.metal_detection_result = None
     st.session_state.affine = None
+    # Add slice caching for fast navigation
+    st.session_state.cached_slices = None
+    # Add window/level state to trigger redraws
+    st.session_state.window_level_key = 0
+    # Initialize window/level tracking
+    st.session_state.prev_window_width = None
+    st.session_state.prev_window_center = None
 
 # Initialize threshold configuration state
 init_threshold_state()
@@ -375,6 +632,13 @@ with st.sidebar:
                     st.session_state.ct_metadata = ct_metadata
                     st.session_state.current_slice = ct_volume.shape[0] // 2
                     st.session_state.affine = create_affine_from_dicom_meta(ct_metadata)
+                    
+                    # Preload all slices for fast navigation
+                    with st.spinner("Caching slices for fast navigation..."):
+                        st.session_state.cached_slices = {
+                            i: ct_volume[i] for i in range(ct_volume.shape[0])
+                        }
+                    
                     st.success(f"Loaded {ct_volume.shape[0]} slices successfully!")
                 else:
                     st.error("Failed to load CT data")
@@ -923,22 +1187,103 @@ if st.session_state.ct_volume is not None:
                                        "Metal Detection Details", "Statistics", "Threshold Preview"])
     
     with tab1:
-        col1, col2 = st.columns([2, 1])
+        st.subheader("🖼️ Advanced CT Slice Viewer")
         
-        with col1:
-            st.subheader("📊 Interactive CT Slice Viewer")
+        # Enhanced slice navigation (full width)
+        current_slice = create_enhanced_slice_navigator(
+            st.session_state.ct_volume,
+            st.session_state.current_slice,
+            st.session_state.ct_metadata
+        )
+        
+        # Main viewer layout
+        col_main, col_controls = st.columns([3, 1])
+        
+        with col_controls:
+            st.markdown("### 🏛️ Controls")
             
-            # Enhanced slice navigation
-            current_slice = create_slice_navigator(
-                st.session_state.ct_volume, 
-                st.session_state.current_slice,
-                st.session_state.ct_metadata
-            )
+            # Window/Level controls with presets
+            window_width, window_center, zmin, zmax = create_window_level_controls()
             
-            # Get current slice data
-            ct_slice = st.session_state.ct_volume[current_slice]
+            st.markdown("---")
+            st.markdown("### 🔍 Analysis Tools")
             
-            # Create masks for current slice if they exist
+            # Metal Detection Button
+            if st.button("🎯 Detect Metal", type="primary", use_container_width=True):
+                with st.spinner("Detecting metal implant..."):
+                    start_time = time.time()
+                    # Use 3D adaptive method
+                    detector = MetalDetector(MetalDetectionMethod.ADAPTIVE_3D)
+                    spacing = np.abs(st.session_state.ct_metadata['spacing'])
+                    
+                    result = detector.detect(
+                        st.session_state.ct_volume,
+                        spacing,
+                        fw_percentage=75,
+                        margin_cm=2.0,
+                        intensity_percentile=99.5
+                    )
+                    
+                    end_time = time.time()
+                    
+                    if result['mask'] is not None and np.any(result['mask']):
+                        st.session_state.metal_detection_result = result
+                        st.session_state.masks['metal'] = result['mask']
+                        
+                        metal_count = np.sum(result['mask'])
+                        st.success(f"Metal detected! Found {metal_count:,} voxels")
+                        st.info(f"⏱️ Detection took {end_time - start_time:.2f}s")
+                        st.rerun()
+                    else:
+                        st.error("No metal implant detected")
+            
+            # Artifact Segmentation Button
+            if st.button("🔮 Segment Artifacts", 
+                       disabled='metal' not in st.session_state.masks,
+                       use_container_width=True):
+                if 'metal' in st.session_state.masks:
+                    with st.spinner("Segmenting artifacts..."):
+                        start_time = time.time()
+                        metal_mask = st.session_state.masks['metal']
+                        roi_bounds = st.session_state.metal_detection_result['roi_bounds']
+                        
+                        # Get current method and thresholds
+                        from contour_operations import create_context_aware_masks
+                        
+                        # Use context-aware segmentation
+                        masks = create_context_aware_masks(
+                            st.session_state.ct_volume,
+                            metal_mask,
+                            np.abs(st.session_state.ct_metadata['spacing']),
+                            dark_artifacts_range=(-1024, -150),
+                            bright_artifacts_range=(200, 3000),
+                            bone_range=(400, 1800)
+                        )
+                        
+                        # Store all masks
+                        st.session_state.masks.update(masks)
+                        
+                        end_time = time.time()
+                        st.success(f"Segmentation complete! ({end_time - start_time:.2f}s)")
+                        st.rerun()
+            
+            # Clear Results Button
+            if st.button("🗑️ Clear Results", use_container_width=True):
+                if 'masks' in st.session_state:
+                    st.session_state.masks.clear()
+                if 'metal_detection_result' in st.session_state:
+                    del st.session_state.metal_detection_result
+                st.success("Results cleared!")
+                st.rerun()
+        
+        with col_main:
+            # Get current slice data (use cache if available for faster loading)
+            if st.session_state.cached_slices is not None:
+                ct_slice = st.session_state.cached_slices[current_slice]
+            else:
+                ct_slice = st.session_state.ct_volume[current_slice]
+            
+            # Create masks for current slice if they exist  
             current_masks = {}
             if st.session_state.masks:
                 for mask_name, mask in st.session_state.masks.items():
@@ -948,32 +1293,43 @@ if st.session_state.ct_volume is not None:
                         else:
                             current_masks[mask_name] = mask
             
-            # Create interactive viewer
+            # Create interactive viewer with current W/L settings
             z_pos = st.session_state.ct_metadata['slice_z_positions'][current_slice]
             slice_info = f"Slice {current_slice + 1}/{st.session_state.ct_volume.shape[0]} (Z: {z_pos:.2f}mm)"
             
-            # Create and display interactive viewer
+            # Create and display interactive viewer with W/L settings
+            # Use unique key to force refresh when window/level changes
             fig, config = create_interactive_viewer(
-                ct_slice, 
-                current_masks, 
+                ct_slice,
+                current_masks,
                 slice_info,
-                st.session_state.ct_metadata['spacing']
+                st.session_state.ct_metadata['spacing'],
+                window_width=window_width,
+                window_center=window_center
             )
-            st.plotly_chart(fig, use_container_width=True, config=config)
+            st.plotly_chart(
+                fig, 
+                use_container_width=True, 
+                config=config,
+                key=f"main_viewer_{st.session_state.window_level_key}_{current_slice}"
+            )
             
-            # Viewer controls
-            with st.expander("🎛️ Viewer Options", expanded=False):
-                col_opt1, col_opt2 = st.columns(2)
-                with col_opt1:
-                    window_center = st.slider("Window Center (HU)", -500, 500, 50)
-                    window_width = st.slider("Window Width (HU)", 100, 1000, 400)
-                with col_opt2:
-                    st.write("**Display Statistics**")
+            # Show slice statistics
+            with st.expander("📈 Slice Statistics", expanded=False):
+                col_stat1, col_stat2, col_stat3, col_stat4 = st.columns(4)
+                with col_stat1:
                     st.metric("Min HU", f"{np.min(ct_slice):.0f}")
+                with col_stat2:
                     st.metric("Max HU", f"{np.max(ct_slice):.0f}")
+                with col_stat3:
                     st.metric("Mean HU", f"{np.mean(ct_slice):.0f}")
+                with col_stat4:
+                    st.metric("Std Dev", f"{np.std(ct_slice):.0f}")
+        
+        # Move analysis buttons to the controls column
+        with col_controls:
             
-            # Analysis buttons
+            # Analysis buttons are now in the controls column
             col_btn1, col_btn2 = st.columns(2)
             
             with col_btn1:
@@ -1287,66 +1643,7 @@ if st.session_state.ct_volume is not None:
                             elapsed_time = end_time - start_time
                             st.info(f"⏱️ Segmentation took {elapsed_time:.2f} seconds.")
             
-            # Display visualization
-            if st.session_state.masks:
-                roi_bounds = None
-                if st.session_state.metal_detection_result:
-                    roi_bounds = st.session_state.metal_detection_result['roi_bounds']
-                    # Convert 3D bounds to 2D for current slice
-                    roi_bounds_2d = {
-                        'y_min': roi_bounds['y_min'],
-                        'y_max': roi_bounds['y_max'], 
-                        'x_min': roi_bounds['x_min'],
-                        'x_max': roi_bounds['x_max']
-                    }
-                
-                # Create masks dict for current slice only - respect visibility settings
-                slice_masks = {}
-                for name, mask in st.session_state.masks.items():
-                    if isinstance(mask, np.ndarray) and mask.ndim == 3:
-                        # Only include if visibility is enabled
-                        if st.session_state.contour_visibility.get(name, True):
-                            slice_masks[name] = mask[current_slice]
-                
-                # Convert roi_bounds_2d dict to tuple format expected by create_overlay_image
-                # Only show ROI if current slice is in valid_roi_slices
-                roi_boundaries_tuple = None
-                if roi_bounds_2d:
-                    valid_roi_slices = st.session_state.metal_detection_result.get('valid_roi_slices', None)
-                    if valid_roi_slices is None or current_slice in valid_roi_slices:
-                        roi_boundaries_tuple = (
-                            roi_bounds_2d['y_min'],
-                            roi_bounds_2d['y_max'],
-                            roi_bounds_2d['x_min'],
-                            roi_bounds_2d['x_max']
-                        )
-                
-                # Get individual regions for this slice if using 3D adaptive detection
-                current_slice_regions = None
-                if (st.session_state.metal_detection_result and 
-                    'individual_regions' in st.session_state.metal_detection_result and
-                    current_slice in st.session_state.metal_detection_result['individual_regions']):
-                    current_slice_regions = st.session_state.metal_detection_result['individual_regions'][current_slice]
-                
-                fig = create_overlay_image(
-                    ct_slice,
-                    slice_masks,
-                    roi_boundaries_tuple,
-                    current_slice,
-                    individual_regions=current_slice_regions,
-                    custom_names=st.session_state.contour_names,
-                    spacing=st.session_state.ct_metadata['spacing']
-                )
-                st.pyplot(fig)
-                plt.close()
-            else:
-                # Show simple preview
-                fig, ax = plt.subplots(figsize=(8, 8))
-                ax.imshow(ct_slice, cmap='gray', vmin=-150, vmax=250)
-                ax.set_title(f"CT Slice {current_slice}")
-                ax.axis('off')
-                st.pyplot(fig)
-                plt.close()
+            # This matplotlib visualization is removed - all contours now show on main plotly viewer above
         
         with col2:
             st.subheader("Analysis Results")

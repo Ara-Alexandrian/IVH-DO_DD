@@ -9,3 +9,4 @@ tests/misc/*.png
 __pycache__/
 *.pyc
 *.pyo
+*.log
