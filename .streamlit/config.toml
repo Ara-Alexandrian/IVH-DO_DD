@@ -1,0 +1,31 @@
+# Streamlit Configuration for Medical Imaging Application
+# https://docs.streamlit.io/develop/api-reference/configuration/config.toml
+
+[server]
+# Increase file upload limit to 3GB for high-performance medical imaging system
+maxUploadSize = 3072
+
+# Increase max message size to 3GB to handle large volume data transfers
+# This is the key setting that was causing the "message size limit exceeded" error
+maxMessageSize = 3072
+
+# Disable CORS for better performance in local/controlled environments
+enableCORS = false
+
+# Disable XSRF protection to allow CORS disable (safe in controlled environment)
+enableXsrfProtection = false
+
+# Enable WebSocket compression for better performance with large datasets
+enableWebsocketCompression = true
+
+[browser]
+# Disable usage stats collection
+gatherUsageStats = false
+
+[theme]
+# Dark theme for medical imaging applications
+base = "dark"
+primaryColor = "#ff6b6b"
+backgroundColor = "#0e1117"
+secondaryBackgroundColor = "#262730"
+textColor = "#ffffff"
