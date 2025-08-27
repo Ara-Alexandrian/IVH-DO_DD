@@ -8,6 +8,11 @@ import time
 from dicom_utils import load_dicom_series_to_hu, create_metal_mask_from_rtstruct
 # Legacy functions moved inline to fix import errors
 from core.metal_detection import MetalDetector, MetalDetectionMethod
+from visualization import create_overlay_image, create_multi_slice_view, create_histogram
+import plotly.graph_objects as go
+import plotly.express as px
+from plotly.subplots import make_subplots
+from skimage import measure
 
 # Legacy wrapper functions
 def detect_metal_volume(ct_volume, spacing, margin_cm=2.0, fw_percentage=75.0, 
@@ -41,6 +46,213 @@ def save_mask_as_nifti(mask, affine, filepath):
     img = nib.Nifti1Image(mask.astype(np.uint8), affine)
     nib.save(img, filepath)
     return filepath
+
+def create_interactive_viewer(ct_slice, masks=None, slice_info="", spacing=None):
+    """Create an interactive CT slice viewer with zoom and pan capabilities."""
+    # Create base CT image
+    fig = go.Figure()
+    
+    # Add CT image as heatmap
+    fig.add_trace(go.Heatmap(
+        z=ct_slice,
+        colorscale='gray',
+        zmin=-150, zmax=250,
+        showscale=True,
+        colorbar=dict(title="HU", x=1.02),
+        hovertemplate='x: %{x}<br>y: %{y}<br>HU: %{z}<extra></extra>'
+    ))
+    
+    # Add contour overlays if masks are provided
+    if masks:
+        colors = {
+            'metal': 'rgba(255, 0, 0, 0.8)',              # Bright Red
+            'bright_artifacts': 'rgba(255, 255, 0, 0.8)',  # Bright Yellow
+            'bright_artifact_bone': 'rgba(255, 127, 0, 0.8)',  # Bright Orange
+            'bright_artifact_tissue': 'rgba(0, 255, 0, 0.8)',  # Bright Green
+            'bright_artifact_mixed': 'rgba(255, 0, 255, 0.7)', # Bright Magenta
+            'dark_artifacts': 'rgba(255, 0, 255, 0.8)',    # Bright Magenta
+            'bone': 'rgba(0, 204, 255, 0.8)'               # Bright Cyan
+        }
+        
+        for mask_name, mask in masks.items():
+            if mask_name in colors and isinstance(mask, np.ndarray):
+                # Handle 3D masks by taking current slice
+                if mask.ndim == 3:
+                    mask_slice = mask[0]  # This will be updated by caller
+                else:
+                    mask_slice = mask
+                    
+                if np.any(mask_slice):
+                    # Create contour from mask
+                    contours = measure.find_contours(mask_slice.astype(float), 0.5)
+                    
+                    for contour in contours:
+                        fig.add_trace(go.Scatter(
+                            x=contour[:, 1],
+                            y=contour[:, 0],
+                            mode='lines',
+                            line=dict(color=colors[mask_name], width=2),
+                            name=mask_name.replace('_', ' ').title(),
+                            showlegend=True,
+                            hoverinfo='name'
+                        ))
+    
+    # Configure layout for interactivity
+    fig.update_layout(
+        title=f"Interactive CT Viewer - {slice_info}",
+        xaxis=dict(
+            title="X (pixels)",
+            scaleanchor="y",
+            scaleratio=1,
+            constrain="domain"
+        ),
+        yaxis=dict(
+            title="Y (pixels)",
+            autorange="reversed",  # Flip Y axis to match image coordinates
+            constrain="domain"
+        ),
+        width=700,
+        height=600,
+        margin=dict(l=50, r=120, t=50, b=50),
+        dragmode="pan",  # Enable pan by default
+        showlegend=True,
+        legend=dict(x=1.05, y=1)
+    )
+    
+    # Add zoom and pan tools
+    config = {
+        'modeBarButtonsToAdd': [
+            'pan2d',
+            'zoomIn2d', 
+            'zoomOut2d',
+            'autoScale2d',
+            'resetScale2d'
+        ],
+        'displayModeBar': True,
+        'displaylogo': False,
+        'modeBarButtonsToRemove': ['lasso2d', 'select2d']
+    }
+    
+    return fig, config
+
+def create_slice_navigator(ct_volume, current_slice, metadata):
+    """Create an enhanced slice navigation interface."""
+    max_slice = ct_volume.shape[0] - 1
+    
+    col1, col2, col3 = st.columns([1, 3, 1])
+    
+    with col1:
+        if st.button("⬅️ Previous", disabled=current_slice <= 0):
+            st.session_state.current_slice = max(0, current_slice - 1)
+            st.rerun()
+    
+    with col2:
+        new_slice = st.slider(
+            "Slice Selection",
+            min_value=0,
+            max_value=max_slice,
+            value=current_slice,
+            format="%d",
+            key="slice_slider"
+        )
+        if new_slice != current_slice:
+            st.session_state.current_slice = new_slice
+            st.rerun()
+    
+    with col3:
+        if st.button("➡️ Next", disabled=current_slice >= max_slice):
+            st.session_state.current_slice = min(max_slice, current_slice + 1)
+            st.rerun()
+    
+    # Display slice info
+    z_pos = metadata['slice_z_positions'][current_slice]
+    st.info(f"📍 Slice {current_slice + 1} of {max_slice + 1} | Z: {z_pos:.2f} mm")
+    
+    return st.session_state.current_slice
+
+def create_interactive_multi_slice_view(ct_volume, masks, slice_indices, slice_info_list):
+    """Create an interactive multi-slice viewer with current contours."""
+    n_slices = len(slice_indices)
+    cols = min(4, n_slices)  # Max 4 columns
+    rows = (n_slices + cols - 1) // cols
+    
+    # Create subplot figure
+    fig = make_subplots(
+        rows=rows, cols=cols,
+        subplot_titles=[f"Slice {idx}" for idx in slice_indices],
+        vertical_spacing=0.05,
+        horizontal_spacing=0.02
+    )
+    
+    # Color mapping for masks
+    colors = {
+        'metal': 'red',
+        'bright_artifacts': 'yellow',
+        'bright_artifact_bone': 'orange', 
+        'bright_artifact_tissue': 'lime',
+        'bright_artifact_mixed': 'magenta',
+        'dark_artifacts': 'magenta',
+        'bone': 'cyan'
+    }
+    
+    for i, slice_idx in enumerate(slice_indices):
+        row = i // cols + 1
+        col = i % cols + 1
+        
+        # Add CT image
+        ct_slice = ct_volume[slice_idx]
+        fig.add_trace(
+            go.Heatmap(
+                z=ct_slice,
+                colorscale='gray',
+                zmin=-150, zmax=250,
+                showscale=False,
+                hovertemplate=f'Slice {slice_idx}<br>HU: %{{z}}<extra></extra>'
+            ),
+            row=row, col=col
+        )
+        
+        # Add mask contours
+        if masks:
+            for mask_name, mask in masks.items():
+                if mask_name in colors and isinstance(mask, np.ndarray):
+                    if mask.ndim == 3 and slice_idx < mask.shape[0]:
+                        mask_slice = mask[slice_idx]
+                    else:
+                        continue
+                        
+                    if np.any(mask_slice):
+                        # Find contours
+                        contours = measure.find_contours(mask_slice.astype(float), 0.5)
+                        
+                        for contour in contours:
+                            fig.add_trace(
+                                go.Scatter(
+                                    x=contour[:, 1],
+                                    y=contour[:, 0],
+                                    mode='lines',
+                                    line=dict(color=colors[mask_name], width=1.5),
+                                    name=mask_name if i == 0 else None,  # Only show legend for first occurrence
+                                    showlegend=(i == 0 and mask_name in colors),
+                                    hoverinfo='name'
+                                ),
+                                row=row, col=col
+                            )
+    
+    # Update layout
+    fig.update_layout(
+        title="Multi-Slice Overview with Current Contours",
+        showlegend=True,
+        height=200 * rows,
+        margin=dict(l=20, r=20, t=40, b=20)
+    )
+    
+    # Update all subplots to have equal aspect ratio
+    for i in range(1, rows * cols + 1):
+        fig.update_xaxes(scaleanchor=f"y{i}", scaleratio=1, row=(i-1)//cols + 1, col=(i-1)%cols + 1)
+        fig.update_yaxes(autorange="reversed", row=(i-1)//cols + 1, col=(i-1)%cols + 1)
+    
+    return fig
 from core.discrimination import ArtifactDiscriminator, DiscriminationMethod
 from contour_operations import (create_bright_artifact_mask, create_dark_artifact_mask,
                                create_bone_mask, save_all_contours_as_nifti, refine_mask,
@@ -685,25 +897,56 @@ if st.session_state.ct_volume is not None:
         col1, col2 = st.columns([2, 1])
         
         with col1:
-            st.subheader("CT Slice Viewer")
+            st.subheader("📊 Interactive CT Slice Viewer")
             
-            # Slice selector
-            max_slice = st.session_state.ct_volume.shape[0] - 1
-            current_slice = st.slider(
-                "Select Slice",
-                min_value=0,
-                max_value=max_slice,
-                value=st.session_state.current_slice,
-                format="Slice %d"
+            # Enhanced slice navigation
+            current_slice = create_slice_navigator(
+                st.session_state.ct_volume, 
+                st.session_state.current_slice,
+                st.session_state.ct_metadata
             )
-            st.session_state.current_slice = current_slice
             
             # Get current slice data
             ct_slice = st.session_state.ct_volume[current_slice]
             
-            # Display slice info
+            # Create masks for current slice if they exist
+            current_masks = {}
+            if st.session_state.masks:
+                for mask_name, mask in st.session_state.masks.items():
+                    if isinstance(mask, np.ndarray):
+                        if mask.ndim == 3:
+                            current_masks[mask_name] = mask[current_slice]
+                        else:
+                            current_masks[mask_name] = mask
+            
+            # Create interactive viewer
             z_pos = st.session_state.ct_metadata['slice_z_positions'][current_slice]
-            st.info(f"Slice {current_slice + 1} of {max_slice + 1} | Z position: {z_pos:.2f} mm")
+            slice_info = f"Slice {current_slice + 1}/{st.session_state.ct_volume.shape[0]} (Z: {z_pos:.2f}mm)"
+            
+            try:
+                fig, config = create_interactive_viewer(
+                    ct_slice, 
+                    current_masks, 
+                    slice_info,
+                    st.session_state.ct_metadata['spacing']
+                )
+                st.plotly_chart(fig, use_container_width=True, config=config)
+            except Exception as e:
+                # Fallback to basic display if interactive viewer fails
+                st.error(f"Interactive viewer failed: {e}")
+                st.image(ct_slice, caption=slice_info, use_column_width=True)
+            
+            # Viewer controls
+            with st.expander("🎛️ Viewer Options", expanded=False):
+                col_opt1, col_opt2 = st.columns(2)
+                with col_opt1:
+                    window_center = st.slider("Window Center (HU)", -500, 500, 50)
+                    window_width = st.slider("Window Width (HU)", 100, 1000, 400)
+                with col_opt2:
+                    st.write("**Display Statistics**")
+                    st.metric("Min HU", f"{np.min(ct_slice):.0f}")
+                    st.metric("Max HU", f"{np.max(ct_slice):.0f}")
+                    st.metric("Mean HU", f"{np.mean(ct_slice):.0f}")
             
             # Analysis buttons
             col_btn1, col_btn2 = st.columns(2)
@@ -1140,26 +1383,40 @@ if st.session_state.ct_volume is not None:
                                 plt.close()
     
     with tab2:
-        st.subheader("Multi-Slice Overview")
+        st.subheader("🖼️ Interactive Multi-Slice Overview")
         
         if st.session_state.masks:
-            # Select slices to display
-            n_slices = st.slider("Number of slices to display", 4, 16, 8)
+            # Enhanced slice selection controls
+            col_ctrl1, col_ctrl2, col_ctrl3 = st.columns([1, 2, 1])
             
-            # Get slice indices
-            if st.session_state.metal_detection_result:
+            with col_ctrl1:
+                n_slices = st.selectbox("Slices to display", [4, 6, 8, 9, 12, 16], index=2)
+            
+            with col_ctrl2:
+                slice_mode = st.radio(
+                    "Slice selection mode",
+                    ["ROI Region", "Full Volume", "Around Current"],
+                    horizontal=True
+                )
+            
+            with col_ctrl3:
+                show_grid = st.checkbox("Show grid", value=True)
+            
+            # Get slice indices based on mode
+            if slice_mode == "ROI Region" and st.session_state.metal_detection_result:
                 roi_bounds = st.session_state.metal_detection_result['roi_bounds']
                 z_min, z_max = roi_bounds['z_min'], roi_bounds['z_max']
                 slice_indices = np.linspace(z_min, z_max-1, n_slices, dtype=int)
-            else:
-                slice_indices = np.linspace(0, st.session_state.ct_volume.shape[0]-1, 
-                                          n_slices, dtype=int)
+            elif slice_mode == "Around Current":
+                current = st.session_state.current_slice
+                half_range = n_slices // 2
+                start = max(0, current - half_range)
+                end = min(st.session_state.ct_volume.shape[0], current + half_range)
+                slice_indices = np.linspace(start, end-1, min(n_slices, end-start), dtype=int)
+            else:  # Full Volume
+                slice_indices = np.linspace(0, st.session_state.ct_volume.shape[0]-1, n_slices, dtype=int)
             
-            # Create multi-slice view
-            individual_regions = None
-            if (st.session_state.metal_detection_result and 
-                'individual_regions' in st.session_state.metal_detection_result):
-                individual_regions = st.session_state.metal_detection_result['individual_regions']
+            slice_indices = slice_indices.astype(int)
             
             # Filter masks based on visibility settings
             visible_masks = {}
@@ -1167,23 +1424,74 @@ if st.session_state.ct_volume is not None:
                 if st.session_state.contour_visibility.get(name, True):
                     visible_masks[name] = mask
             
-            # Get valid ROI slices if available
-            valid_roi_slices = None
-            if st.session_state.metal_detection_result:
-                valid_roi_slices = st.session_state.metal_detection_result.get('valid_roi_slices', None)
+            # Create slice info
+            slice_info_list = []
+            for idx in slice_indices:
+                z_pos = st.session_state.ct_metadata['slice_z_positions'][idx]
+                slice_info_list.append(f"Z: {z_pos:.1f}mm")
             
-            fig = create_multi_slice_view(
-                st.session_state.ct_volume,
-                visible_masks,
-                slice_indices,
-                roi_bounds if st.session_state.metal_detection_result else None,
-                individual_regions=individual_regions,
-                valid_roi_slices=valid_roi_slices
-            )
-            st.pyplot(fig)
-            plt.close()
+            # Try interactive viewer first, fallback to matplotlib
+            try:
+                fig = create_interactive_multi_slice_view(
+                    st.session_state.ct_volume,
+                    visible_masks,
+                    slice_indices,
+                    slice_info_list
+                )
+                st.plotly_chart(fig, use_container_width=True)
+            except Exception as e:
+                st.warning(f"Interactive multi-slice viewer failed ({e}), using fallback...")
+                # Fallback to original viewer
+                roi_bounds = st.session_state.metal_detection_result['roi_bounds'] if st.session_state.metal_detection_result else None
+                individual_regions = None
+                if (st.session_state.metal_detection_result and 
+                    'individual_regions' in st.session_state.metal_detection_result):
+                    individual_regions = st.session_state.metal_detection_result['individual_regions']
+                
+                valid_roi_slices = None
+                if st.session_state.metal_detection_result:
+                    valid_roi_slices = st.session_state.metal_detection_result.get('valid_roi_slices', None)
+                
+                try:
+                    fig = create_multi_slice_view(
+                        st.session_state.ct_volume,
+                        visible_masks,
+                        slice_indices,
+                        roi_bounds,
+                        individual_regions=individual_regions,
+                        valid_roi_slices=valid_roi_slices
+                    )
+                    st.pyplot(fig)
+                    plt.close()
+                except Exception as e2:
+                    st.error(f"Both viewers failed: {e2}")
+            
+            # Show slice summary
+            with st.expander("📄 Slice Summary", expanded=False):
+                summary_data = []
+                for i, idx in enumerate(slice_indices):
+                    z_pos = st.session_state.ct_metadata['slice_z_positions'][idx]
+                    slice_data = {
+                        "Slice": idx,
+                        "Z Position (mm)": f"{z_pos:.2f}",
+                        "Contains Metal": "Yes" if 'metal' in visible_masks and np.any(visible_masks['metal'][idx]) else "No"
+                    }
+                    
+                    # Add mask counts
+                    for mask_name in ['bright_artifacts', 'dark_artifacts', 'bone']:
+                        if mask_name in visible_masks:
+                            count = np.sum(visible_masks[mask_name][idx]) if visible_masks[mask_name].ndim == 3 else 0
+                            slice_data[mask_name.replace('_', ' ').title() + " (px)"] = count
+                    
+                    summary_data.append(slice_data)
+                
+                if summary_data:
+                    import pandas as pd
+                    df = pd.DataFrame(summary_data)
+                    st.dataframe(df, use_container_width=True)
         else:
-            st.info("Run metal detection and segmentation first to view multiple slices")
+            st.info("🔍 Run metal detection and segmentation first to view multiple slices")
+            st.markdown("**Quick tip:** Use the analysis buttons in the Single Slice tab to get started!")
     
     with tab3:
         st.subheader("Metal Detection Analysis")
