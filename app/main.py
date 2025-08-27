@@ -10,16 +10,9 @@ from dicom_utils import load_dicom_series_to_hu, create_metal_mask_from_rtstruct
 from core.metal_detection import MetalDetector, MetalDetectionMethod
 from visualization import create_overlay_image, create_multi_slice_view, create_histogram
 from skimage import measure
-
-# Try to import plotly for interactive features, fallback gracefully
-try:
-    import plotly.graph_objects as go
-    import plotly.express as px
-    from plotly.subplots import make_subplots
-    PLOTLY_AVAILABLE = True
-except ImportError:
-    PLOTLY_AVAILABLE = False
-    # Warning will be shown in sidebar instead of here to avoid import-time streamlit calls
+import plotly.graph_objects as go
+import plotly.express as px
+from plotly.subplots import make_subplots
 
 # Legacy wrapper functions
 def detect_metal_volume(ct_volume, spacing, margin_cm=2.0, fw_percentage=75.0, 
@@ -56,21 +49,27 @@ def save_mask_as_nifti(mask, affine, filepath):
 
 def create_interactive_viewer(ct_slice, masks=None, slice_info="", spacing=None):
     """Create an interactive CT slice viewer with zoom and pan capabilities."""
-    if not PLOTLY_AVAILABLE:
-        # Fallback to matplotlib
-        return create_matplotlib_viewer(ct_slice, masks, slice_info, spacing)
-    
     # Create base CT image
     fig = go.Figure()
     
-    # Add CT image as heatmap
+    # Add CT image as heatmap (ensure proper orientation)
+    # Convert to list for plotly compatibility and proper display
+    ct_data = ct_slice.tolist() if hasattr(ct_slice, 'tolist') else ct_slice
+    
     fig.add_trace(go.Heatmap(
-        z=ct_slice,
+        z=ct_data,
         colorscale='gray',
-        zmin=-150, zmax=250,
+        zmin=-150,
+        zmax=250,
         showscale=True,
-        colorbar=dict(title="HU", x=1.02),
-        hovertemplate='x: %{x}<br>y: %{y}<br>HU: %{z}<extra></extra>'
+        colorbar=dict(
+            title="HU",
+            x=1.02,
+            thickness=15,
+            len=0.7
+        ),
+        hovertemplate='X: %{x}<br>Y: %{y}<br>HU: %{z:.0f}<extra></extra>',
+        name='CT Image'
     ))
     
     # Add contour overlays if masks are provided
@@ -95,53 +94,72 @@ def create_interactive_viewer(ct_slice, masks=None, slice_info="", spacing=None)
                     
                 if np.any(mask_slice):
                     # Create contour from mask
-                    contours = measure.find_contours(mask_slice.astype(float), 0.5)
-                    
-                    for contour in contours:
-                        fig.add_trace(go.Scatter(
-                            x=contour[:, 1],
-                            y=contour[:, 0],
-                            mode='lines',
-                            line=dict(color=colors[mask_name], width=2),
-                            name=mask_name.replace('_', ' ').title(),
-                            showlegend=True,
-                            hoverinfo='name'
-                        ))
+                    try:
+                        contours = measure.find_contours(mask_slice.astype(float), 0.5)
+                        
+                        # Only show first occurrence in legend to avoid duplicates
+                        show_legend = mask_name not in [trace.name for trace in fig.data if hasattr(trace, 'name')]
+                        
+                        for contour in contours:
+                            fig.add_trace(go.Scatter(
+                                x=contour[:, 1],
+                                y=contour[:, 0],
+                                mode='lines',
+                                line=dict(color=colors[mask_name], width=2),
+                                name=mask_name.replace('_', ' ').title(),
+                                showlegend=show_legend,
+                                hoverinfo='name',
+                                legendgroup=mask_name  # Group contours together
+                            ))
+                            show_legend = False  # Only show legend for first contour
+                    except Exception as e:
+                        print(f"Error creating contour for {mask_name}: {e}")
     
-    # Configure layout for interactivity
+    # Configure layout for medical image display
     fig.update_layout(
-        title=f"Interactive CT Viewer - {slice_info}",
+        title=dict(
+            text=f"<b>CT Slice View</b> - {slice_info}",
+            font=dict(size=16)
+        ),
         xaxis=dict(
             title="X (pixels)",
             scaleanchor="y",
             scaleratio=1,
-            constrain="domain"
+            constrain="domain",
+            showgrid=False,
+            zeroline=False
         ),
         yaxis=dict(
             title="Y (pixels)",
             autorange="reversed",  # Flip Y axis to match image coordinates
-            constrain="domain"
+            constrain="domain",
+            showgrid=False,
+            zeroline=False
         ),
-        width=700,
-        height=600,
-        margin=dict(l=50, r=120, t=50, b=50),
+        width=800,
+        height=700,
+        margin=dict(l=60, r=150, t=60, b=60),
         dragmode="pan",  # Enable pan by default
         showlegend=True,
-        legend=dict(x=1.05, y=1)
+        legend=dict(
+            x=1.02,
+            y=1,
+            bgcolor="rgba(255, 255, 255, 0.8)",
+            bordercolor="black",
+            borderwidth=1
+        ),
+        plot_bgcolor='black',
+        paper_bgcolor='white'
     )
     
     # Add zoom and pan tools
     config = {
-        'modeBarButtonsToAdd': [
-            'pan2d',
-            'zoomIn2d', 
-            'zoomOut2d',
-            'autoScale2d',
-            'resetScale2d'
-        ],
+        'modeBarButtonsToAdd': ['pan2d', 'zoom2d', 'resetScale2d'],
         'displayModeBar': True,
         'displaylogo': False,
-        'modeBarButtonsToRemove': ['lasso2d', 'select2d']
+        'modeBarButtonsToRemove': ['lasso2d', 'select2d', 'toImage'],
+        'scrollZoom': True,
+        'doubleClick': 'reset'
     }
     
     return fig, config
@@ -181,59 +199,8 @@ def create_slice_navigator(ct_volume, current_slice, metadata):
     
     return st.session_state.current_slice
 
-def create_matplotlib_viewer(ct_slice, masks=None, slice_info="", spacing=None):
-    """Fallback matplotlib viewer when plotly is not available."""
-    fig, ax = plt.subplots(figsize=(10, 8))
-    
-    # Display CT image
-    im = ax.imshow(ct_slice, cmap='gray', vmin=-150, vmax=250)
-    
-    # Add colorbar
-    cbar = plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-    cbar.set_label('HU', rotation=270, labelpad=15)
-    
-    # Add contours if masks provided
-    if masks:
-        colors = {
-            'metal': 'red',
-            'bright_artifacts': 'yellow',
-            'bright_artifact_bone': 'orange',
-            'bright_artifact_tissue': 'lime',
-            'bright_artifact_mixed': 'magenta',
-            'dark_artifacts': 'magenta',
-            'bone': 'cyan'
-        }
-        
-        for mask_name, mask in masks.items():
-            if mask_name in colors and isinstance(mask, np.ndarray) and np.any(mask):
-                # Create contours from mask
-                from skimage import measure
-                contours = measure.find_contours(mask.astype(float), 0.5)
-                
-                for contour in contours:
-                    ax.plot(contour[:, 1], contour[:, 0], color=colors[mask_name], 
-                           linewidth=2, label=mask_name.replace('_', ' ').title())
-    
-    ax.set_title(slice_info)
-    ax.set_xlabel('X (pixels)')
-    ax.set_ylabel('Y (pixels)')
-    ax.grid(False)
-    
-    # Remove duplicate labels in legend
-    handles, labels = ax.get_legend_handles_labels()
-    by_label = dict(zip(labels, handles))
-    if by_label:
-        ax.legend(by_label.values(), by_label.keys(), loc='upper right')
-    
-    plt.tight_layout()
-    return fig, None  # Return None for config since matplotlib doesn't use it
-
 def create_interactive_multi_slice_view(ct_volume, masks, slice_indices, slice_info_list):
     """Create an interactive multi-slice viewer with current contours."""
-    if not PLOTLY_AVAILABLE:
-        # Fallback to original multi-slice viewer
-        return None  # Will be handled by caller
-    
     n_slices = len(slice_indices)
     cols = min(4, n_slices)  # Max 4 columns
     rows = (n_slices + cols - 1) // cols
@@ -332,18 +299,6 @@ st.set_page_config(
     layout="wide",
     initial_sidebar_state="expanded"
 )
-
-# Show plotly warning if not available
-if not PLOTLY_AVAILABLE:
-    st.sidebar.warning("""
-    ⚠️ **Enhanced viewers not available**
-    
-    Install plotly for interactive features:
-    ```bash
-    pip install plotly>=5.15.0
-    ```
-    Using matplotlib fallback mode.
-    """)
 
 # Custom CSS
 st.markdown("""
@@ -997,25 +952,14 @@ if st.session_state.ct_volume is not None:
             z_pos = st.session_state.ct_metadata['slice_z_positions'][current_slice]
             slice_info = f"Slice {current_slice + 1}/{st.session_state.ct_volume.shape[0]} (Z: {z_pos:.2f}mm)"
             
-            try:
-                fig, config = create_interactive_viewer(
-                    ct_slice, 
-                    current_masks, 
-                    slice_info,
-                    st.session_state.ct_metadata['spacing']
-                )
-                if PLOTLY_AVAILABLE and config is not None:
-                    st.plotly_chart(fig, use_container_width=True, config=config)
-                else:
-                    # Using matplotlib fallback
-                    st.pyplot(fig)
-                    plt.close()
-            except Exception as e:
-                # Fallback to basic display if viewer fails
-                st.error(f"Viewer failed: {e}")
-                # Normalize image for display
-                img_normalized = (ct_slice - ct_slice.min()) / (ct_slice.max() - ct_slice.min())
-                st.image(img_normalized, caption=slice_info, use_column_width=True)
+            # Create and display interactive viewer
+            fig, config = create_interactive_viewer(
+                ct_slice, 
+                current_masks, 
+                slice_info,
+                st.session_state.ct_metadata['spacing']
+            )
+            st.plotly_chart(fig, use_container_width=True, config=config)
             
             # Viewer controls
             with st.expander("🎛️ Viewer Options", expanded=False):
@@ -1511,50 +1455,14 @@ if st.session_state.ct_volume is not None:
                 z_pos = st.session_state.ct_metadata['slice_z_positions'][idx]
                 slice_info_list.append(f"Z: {z_pos:.1f}mm")
             
-            # Try interactive viewer first, fallback to matplotlib
-            use_fallback = not PLOTLY_AVAILABLE
-            
-            if not use_fallback:
-                try:
-                    fig = create_interactive_multi_slice_view(
-                        st.session_state.ct_volume,
-                        visible_masks,
-                        slice_indices,
-                        slice_info_list
-                    )
-                    if fig is not None:
-                        st.plotly_chart(fig, use_container_width=True)
-                    else:
-                        use_fallback = True
-                except Exception as e:
-                    st.warning(f"Interactive multi-slice viewer failed ({e}), using fallback...")
-                    use_fallback = True
-            
-            if use_fallback:
-                # Fallback to original viewer
-                roi_bounds = st.session_state.metal_detection_result['roi_bounds'] if st.session_state.metal_detection_result else None
-                individual_regions = None
-                if (st.session_state.metal_detection_result and 
-                    'individual_regions' in st.session_state.metal_detection_result):
-                    individual_regions = st.session_state.metal_detection_result['individual_regions']
-                
-                valid_roi_slices = None
-                if st.session_state.metal_detection_result:
-                    valid_roi_slices = st.session_state.metal_detection_result.get('valid_roi_slices', None)
-                
-                try:
-                    fig = create_multi_slice_view(
-                        st.session_state.ct_volume,
-                        visible_masks,
-                        slice_indices,
-                        roi_bounds,
-                        individual_regions=individual_regions,
-                        valid_roi_slices=valid_roi_slices
-                    )
-                    st.pyplot(fig)
-                    plt.close()
-                except Exception as e2:
-                    st.error(f"Both viewers failed: {e2}")
+            # Create and display interactive multi-slice viewer
+            fig = create_interactive_multi_slice_view(
+                st.session_state.ct_volume,
+                visible_masks,
+                slice_indices,
+                slice_info_list
+            )
+            st.plotly_chart(fig, use_container_width=True)
             
             # Show slice summary
             with st.expander("📄 Slice Summary", expanded=False):
